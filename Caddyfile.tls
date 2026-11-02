@@ -1,0 +1,47 @@
+# Caraok — 源站 TLS(Cloudflare SSL 模式 Full 的前置)
+#
+# 同一站点用两个 server 块(Caddy 不允许 HTTP/HTTPS 混在一个块里):
+#   :80  —— 现状回源(CF Flexible 时使用)
+#   :443 —— 启用后供 CF Full 模式回源,证书来自 secrets/origin.pem
+#
+# 部署:见 scripts/enable-origin-tls.sh
+
+(common_headers) {
+    header {
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        X-Frame-Options "DENY"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        Strict-Transport-Security "max-age=31536000"
+        Content-Security-Policy "default-src 'self'; img-src 'self' https: data:; media-src 'self'; connect-src 'self'; style-src 'self'; font-src 'self' data:; script-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+    }
+}
+
+(common_routes) {
+    encode zstd gzip
+    handle /api/* {
+        reverse_proxy api:8000
+    }
+    handle /healthz {
+        reverse_proxy api:8000
+    }
+    handle /media/* {
+        respond "Not found" 404
+    }
+    handle {
+        root * /srv
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+http://:80 {
+    import common_headers
+    import common_routes
+}
+
+https://:443 {
+    import common_headers
+    import common_routes
+    tls /etc/caddy/origin.pem /etc/caddy/origin.key
+}

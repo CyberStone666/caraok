@@ -1,0 +1,17 @@
+.env
+.git
+**/node_modules
+**/dist
+**/__pycache__
+**/.pytest_cache
+backend
+config
+README.md
+*.zip
+
+# Runtime state must never enter a build context (media/ can be 100MB+).
+media
+data
+.workbuddy
+.ytdl-cache
+secrets

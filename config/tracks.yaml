@@ -1,0 +1,15 @@
+# 首次启动的种子曲库:仅在此文件不存在时被导入一次,之后以 SQLite(data/caraok.db)为准。
+# 上传你拥有或明确获得授权的音频文件,并在管理页添加,或把 url 指向你的 HTTPS 音源。
+# url 主机名必须同时列在 .env 的 AUDIO_ALLOWED_HOSTS 中。
+
+categories:
+  - id: music
+    name: 音乐
+    description: 个人音乐收藏
+    order: 1
+  - id: podcast
+    name: 播客
+    description: 访谈与故事
+    order: 2
+
+tracks: []

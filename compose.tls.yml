@@ -1,0 +1,20 @@
+# Caraok — 源站 TLS(Cloudflare SSL 模式 Full 的前置)
+#
+# web 额外监听 443,并使用 secrets/origin.pem + origin.key 提供 TLS。
+# 与 compose.proxied.yml 叠加使用(顺序:base -> proxied -> tls):
+#   docker compose -f docker-compose.yml -f compose.proxied.yml -f compose.tls.yml up -d
+#
+# 证书无需 CF 签发:Full(非 strict)模式不校验证书链,自签即可;
+# 若要 Full(strict),请换成 CF 面板签发的 Origin CA 证书。
+
+services:
+  web:
+    ports: !override
+      - "172.17.0.1:8091:80"
+      - "172.17.0.1:8443:443"
+    volumes: !override
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./Caddyfile.active:/etc/caddy/Caddyfile:ro
+      - ./secrets/origin.pem:/etc/caddy/origin.pem:ro
+      - ./secrets/origin.key:/etc/caddy/origin.key:ro

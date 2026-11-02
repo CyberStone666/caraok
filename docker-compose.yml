@@ -1,0 +1,69 @@
+name: caraok
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  api:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MEDIA_DIR: /app/media
+      PUBLIC_MEDIA_BASE: ${PUBLIC_MEDIA_BASE:-}
+      DB_PATH: /app/data/caraok.db
+      YTDLP_COOKIES: /run/secrets/yt.cookies
+      YTDLP_PROXY: ${YTDLP_PROXY:-}
+      YTDLP_POT_URL: ${YTDLP_POT_URL:-}
+    volumes:
+      - ./config:/app/config:ro
+      - ./media:/app/media
+      - ./data:/app/data
+      - ${YTDLP_COOKIES_HOST:-/opt/caraok/secrets/yt.cookies}:/run/secrets/yt.cookies:ro
+      - ./.ytdl-cache:/app/.ytdl-cache
+    logging: *default-logging
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - private-audio
+
+  web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env to your public hostname}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - private-audio
+
+networks:
+  private-audio:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,21 @@
+.env
+**/node_modules/
+**/dist/
+**/.pytest_cache/
+**/__pycache__/
+*.py[cod]
+
+# YouTube 登录凭据,严禁入库
+youtube_cookies.txt
+
+# 音频媒体文件(122MB+,可经管理页重新下载生成;本地目录负责 rsync 镜像)
+media/
+
+# SQLite 曲库(运行时状态,勿入库)
+data/
+
+# WorkBuddy 工作区元数据(本地记忆/日志,非项目产物)
+.workbuddy/
+
+# 部署站点配置(含服务器地址,严禁入库)
+scripts/deploy.conf

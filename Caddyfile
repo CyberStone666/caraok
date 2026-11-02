@@ -1,0 +1,33 @@
+{$DOMAIN} {
+    encode zstd gzip
+
+    header {
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        X-Frame-Options "DENY"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        Strict-Transport-Security "max-age=31536000"
+        Content-Security-Policy "default-src 'self'; img-src 'self' https: data:; media-src 'self'; connect-src 'self'; style-src 'self'; font-src 'self' data:; script-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+    }
+
+    # Downloaded audio is private: only /api/v1/stream/{id} (authenticated)
+    # may read it. This explicit 404 is a guard even if a future deploy
+    # accidentally re-mounts ./media into the web container.
+    handle /media/* {
+        respond "Not found" 404
+    }
+
+    handle /api/* {
+        reverse_proxy api:8000
+    }
+
+    handle /healthz {
+        reverse_proxy api:8000
+    }
+
+    handle {
+        root * /srv
+        try_files {path} /index.html
+        file_server
+    }
+}

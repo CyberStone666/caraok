@@ -1,0 +1,5 @@
+# Pinned download-pipeline dependencies. Installed in the API image only.
+# yt-dlp-ejs ships the challenge scripts, so the process must not fetch them at runtime.
+yt-dlp[socks]==2026.10.26
+yt-dlp-ejs==0.8.0
+bgutil-ytdlp-pot-provider==2.0.2
