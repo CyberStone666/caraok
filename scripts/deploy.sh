@@ -121,7 +121,7 @@ chown -R 10001:10001 $APP_DIR/media $APP_DIR/.ytdl-cache $APP_DIR/config $APP_DI
 #   - 无证书     -> 仅 80,供 CF Flexible 回源
 # 按证书是否存在自动选择,重部署不会把已启用的 TLS 掉回 HTTP-only。
 r "cd $APP_DIR && \\
-   printf 'services:\\n  web:\\n    ports: !override [\\"%s:80\\"]\\n' '$BIND' > compose.proxied.yml && \\
+   printf 'services:\n  web:\n    ports: !override [%s:80]\n' "$BIND" > compose.proxied.yml && \
    if [ -s secrets/origin.pem ] && [ -s secrets/origin.key ]; then \\
      cp Caddyfile.tls Caddyfile.active && echo '源站 TLS: 启用(80 + 443)' && \\
      docker compose -f docker-compose.yml -f compose.proxied.yml -f compose.tls.yml up -d --build; \\
