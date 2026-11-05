@@ -44,10 +44,21 @@ function Cover({ track, large = false }: { track?: Track | null; large?: boolean
   );
 }
 
+function EyeIcon({ off = false }: { off?: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+      <circle cx="12" cy="12" r="3" />
+      {off && <line x1="1" y1="1" x2="23" y2="23" />}
+    </svg>
+  );
+}
+
 function Login({ onLogin }: { onLogin: (token: string) => Promise<void> }) {
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [showToken, setShowToken] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -79,17 +90,28 @@ function Login({ onLogin }: { onLogin: (token: string) => Promise<void> }) {
         <p className="muted login-copy">输入你的个人访问 Token，连接私人音频库。</p>
         <form onSubmit={submit} className="login-form">
           <label htmlFor="access-token">访问 Token</label>
-          <input
-            id="access-token"
-            type="password"
-            autoComplete="off"
-            autoCapitalize="none"
-            spellCheck={false}
-            value={token}
-            onChange={(event) => setToken(event.target.value)}
-            placeholder="粘贴服务端 ACCESS_TOKEN"
-            required
-          />
+          <div className="token-field">
+            <input
+              id="access-token"
+              type={showToken ? 'text' : 'password'}
+              autoComplete="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              value={token}
+              onChange={(event) => setToken(event.target.value)}
+              placeholder="粘贴服务端 ACCESS_TOKEN"
+              required
+            />
+            <button
+              type="button"
+              className="token-toggle"
+              onClick={() => setShowToken((value) => !value)}
+              aria-label={showToken ? '隐藏 Token' : '显示 Token'}
+              title={showToken ? '隐藏' : '显示'}
+            >
+              <EyeIcon off={showToken} />
+            </button>
+          </div>
           {error && <p className="error-text" role="alert">{error}</p>}
           <button className="primary-button login-button" type="submit" disabled={busy || !token.trim()}>
             {busy ? '正在连接…' : '连接音频库'}
