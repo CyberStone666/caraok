@@ -20,10 +20,14 @@
 (common_routes) {
     encode zstd gzip
     handle /api/* {
-        reverse_proxy api:8000
+        reverse_proxy api:8000 {
+            header_up -CF-Connecting-IP
+        }
     }
     handle /healthz {
-        reverse_proxy api:8000
+        reverse_proxy api:8000 {
+            header_up -CF-Connecting-IP
+        }
     }
     handle /media/* {
         respond "Not found" 404

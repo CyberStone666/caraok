@@ -18,6 +18,10 @@ services:
       MEDIA_DIR: /app/media
       PUBLIC_MEDIA_BASE: ${PUBLIC_MEDIA_BASE:-}
       DB_PATH: /app/data/caraok.db
+      # 登录限流是否采信 X-Client-IP / X-Forwarded-For。默认关闭:
+      # 只有确认 API 前面恒有覆写该头的反向代理(deploy.sh 的 nginx 链路)
+      # 时才设为 true,否则客户端可自选限流桶。
+      TRUST_PROXY_CLIENT_IP: ${TRUST_PROXY_CLIENT_IP:-false}
       YTDLP_COOKIES: /run/secrets/yt.cookies
       YTDLP_PROXY: ${YTDLP_PROXY:-}
       YTDLP_POT_URL: ${YTDLP_POT_URL:-}

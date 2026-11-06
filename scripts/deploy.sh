@@ -79,7 +79,7 @@ r "
 cd $APP_DIR
 if [ ! -f .env ]; then
   umask 077
-  printf 'DOMAIN=%s\nACCESS_TOKEN=%s\nAPP_SECRET_KEY=%s\nAUDIO_ALLOWED_HOSTS=%s\nCOOKIE_SECURE=true\nSESSION_TTL_SECONDS=2592000\nTRACKS_CONFIG=/app/config/tracks.yaml\nDB_PATH=/app/data/caraok.db\nPUBLIC_MEDIA_BASE=https://%s/media\n' \
+  printf 'DOMAIN=%s\nACCESS_TOKEN=%s\nAPP_SECRET_KEY=%s\nAUDIO_ALLOWED_HOSTS=%s\nCOOKIE_SECURE=true\nSESSION_TTL_SECONDS=2592000\nTRUST_PROXY_CLIENT_IP=true\nTRACKS_CONFIG=/app/config/tracks.yaml\nDB_PATH=/app/data/caraok.db\nPUBLIC_MEDIA_BASE=https://%s/media\n' \
     '$DOMAIN' \"\$(openssl rand -hex 32)\" \"\$(openssl rand -hex 32)\" '$DOMAIN' '$DOMAIN' > .env
   echo '.env 已生成(600)'
 else
@@ -99,6 +99,9 @@ else
   grep -q '^AUDIO_ALLOWED_HOSTS=' .env || echo 'AUDIO_ALLOWED_HOSTS=$DOMAIN' >> .env
   grep -q '^PUBLIC_MEDIA_BASE=' .env || echo 'PUBLIC_MEDIA_BASE=https://$DOMAIN/media' >> .env
   grep -q '^DB_PATH=' .env || echo 'DB_PATH=/app/data/caraok.db' >> .env
+  # 本脚本的拓扑恒为 nginx -> Caddy -> api,nginx 会覆写 X-Client-IP;
+  # 不打开这个开关,登录限流的桶就退化成"所有客户端共用一个"。
+  grep -q '^TRUST_PROXY_CLIENT_IP=' .env || echo 'TRUST_PROXY_CLIENT_IP=true' >> .env
   # 下载管道需要本 compose 网络的实际网关(docker0 的 172.17.0.1 通常不可用)
   GW=\$(docker network inspect \${COMPOSE_PROJECT_NAME:-\$(basename $APP_DIR)_}-private-audio \
         --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)

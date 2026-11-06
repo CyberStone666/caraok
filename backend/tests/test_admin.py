@@ -185,6 +185,62 @@ def test_admin_delete_local_file(admin_client: TestClient):
     assert response.json()["file_removed"] is True
 
 
+def test_admin_add_returns_the_created_id_not_the_last_sorted_track(admin_client: TestClient):
+    """The stored document is ordered by (order, title) across categories.
+
+    Adding to an earlier category therefore leaves the new track first, and the
+    old "take tracks[-1]" lookup returned a completely different track's id.
+    """
+    _login(admin_client)
+    added = admin_client.post("/api/v1/admin/tracks", json={
+        "title": "Fresh Lesson",
+        "url": "https://audio.example.com/audio/lesson.mp3",
+        "category_id": "learning",
+        "mime_type": "audio/mpeg",
+    })
+    assert added.status_code == 200
+    new_id = added.json()["id"]
+    assert new_id == "fresh-lesson"
+
+    listed = {item["id"] for item in admin_client.get("/api/v1/admin/tracks").json()}
+    assert new_id in listed
+    assert admin_client.get(f"/api/v1/tracks/{new_id}").status_code == 200
+
+
+def test_admin_track_id_is_unique_for_non_latin_titles(admin_client: TestClient):
+    _login(admin_client)
+    body = {
+        "title": "夜航",
+        "url": "https://audio.example.com/audio/night.mp3",
+        "category_id": "music",
+        "mime_type": "audio/mpeg",
+    }
+    first = admin_client.post("/api/v1/admin/tracks", json=body)
+    second = admin_client.post("/api/v1/admin/tracks", json=body)
+    assert first.status_code == second.status_code == 200
+    first_id, second_id = first.json()["id"], second.json()["id"]
+    assert first_id != second_id
+    assert first_id.startswith("track-") and len(first_id) == len("track-") + 6
+
+
+def test_admin_delete_file_rejects_path_outside_media_dir(admin_client: TestClient, tmp_path: Path):
+    _login(admin_client)
+    outside = tmp_path / "secret.m4a"
+    outside.write_bytes(b"keep me")
+    added = admin_client.post("/api/v1/admin/tracks", json={
+        "title": "Sneaky",
+        "url": "https://audio.example.com/media/../secret.m4a",
+        "category_id": "music",
+        "mime_type": "audio/mp4",
+    })
+    assert added.status_code == 200
+    new_id = added.json()["id"]
+    deleted = admin_client.delete(f"/api/v1/admin/tracks/{new_id}", params={"delete_file": "true"})
+    assert deleted.status_code == 200
+    assert deleted.json()["file_removed"] is False
+    assert outside.exists()
+
+
 def test_admin_download_rejected_without_cookies(admin_client: TestClient):
     _login(admin_client)
     response = admin_client.post("/api/v1/admin/downloads", json={

@@ -24,6 +24,10 @@ class Settings:
     ytdl_proxy: str = ""
     ytdl_pot_url: str = ""
     downloads_enabled: bool = False
+    # 登录限流是否采信代理追加的 X-Forwarded-For 最后一跳。
+    # 只有确定 API 前面恒有一个会覆写该头的反向代理(Caddy/nginx)时才可开启;
+    # 直接对外暴露 API 时必须为 false,否则任何客户端都能自选限流桶。
+    trust_proxy_client_ip: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -58,6 +62,11 @@ class Settings:
             raise RuntimeError("COOKIE_SECURE must be a boolean value")
         cookie_secure = secure_raw in {"1", "true", "yes", "on"}
 
+        trust_raw = os.getenv("TRUST_PROXY_CLIENT_IP", "false").strip().lower()
+        if trust_raw not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+            raise RuntimeError("TRUST_PROXY_CLIENT_IP must be a boolean value")
+        trust_proxy_client_ip = trust_raw in {"1", "true", "yes", "on"}
+
         cookies_path: Path | None = None
         cookies_raw = os.getenv("YTDLP_COOKIES", "").strip()
         if cookies_raw:
@@ -82,4 +91,5 @@ class Settings:
             ytdl_proxy=os.getenv("YTDLP_PROXY", "").strip(),
             ytdl_pot_url=os.getenv("YTDLP_POT_URL", "").strip(),
             downloads_enabled=downloads_enabled,
+            trust_proxy_client_ip=trust_proxy_client_ip,
         )
