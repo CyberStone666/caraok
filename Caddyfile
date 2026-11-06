@@ -18,11 +18,18 @@
     }
 
     handle /api/* {
-        reverse_proxy api:8000
+        reverse_proxy api:8000 {
+            # 客户端自带的 CDN 头一律剥掉:应用不读 CF-Connecting-IP,留着只会
+            # 给以后误用埋雷。限流只采信代理自己追加的 X-Forwarded-For 末跳,
+            # 且要求 TRUST_PROXY_CLIENT_IP=true。
+            header_up -CF-Connecting-IP
+        }
     }
 
     handle /healthz {
-        reverse_proxy api:8000
+        reverse_proxy api:8000 {
+            header_up -CF-Connecting-IP
+        }
     }
 
     handle {

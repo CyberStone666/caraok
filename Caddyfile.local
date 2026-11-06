@@ -18,11 +18,15 @@
     }
 
     handle /api/* {
-        reverse_proxy api:8000
+        reverse_proxy api:8000 {
+            header_up -CF-Connecting-IP
+        }
     }
 
     handle /healthz {
-        reverse_proxy api:8000
+        reverse_proxy api:8000 {
+            header_up -CF-Connecting-IP
+        }
     }
 
     handle {

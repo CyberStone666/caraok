@@ -4,6 +4,7 @@ import hmac
 import ipaddress
 import logging
 import re
+import secrets
 import stat
 import threading
 import typing
@@ -43,7 +44,13 @@ class LoginBody(BaseModel):
 
 
 class LoginThrottle:
-    """Small in-process guard against repeated token guessing."""
+    """Small in-process guard against repeated token guessing.
+
+    A successful login never clears the failure history for a key: otherwise any
+    holder of a valid guest token could reset the counter at will and keep
+    guessing forever (7 wrong + 1 right, repeated). Failures therefore decay
+    only by ageing out of the window.
+    """
 
     def __init__(self, limit: int = 8, window_seconds: int = 900):
         self.limit = limit
@@ -65,10 +72,6 @@ class LoginThrottle:
         with self._lock:
             self._attempts.setdefault(key, []).append(monotonic())
 
-    def success(self, key: str) -> None:
-        with self._lock:
-            self._attempts.pop(key, None)
-
 
 def create_upstream_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
@@ -80,31 +83,44 @@ def create_upstream_client() -> httpx.AsyncClient:
     )
 
 
-def _login_throttle_key(peer_host: str | None, forwarded_for: str | None, cf_connecting_ip: str | None = None) -> str:
+def _login_throttle_key(
+    peer_host: str | None,
+    forwarded_for: str | None,
+    client_ip: str | None = None,
+    *,
+    trust_proxy: bool = False,
+) -> str:
     """Derive the login throttle key from the socket peer and proxy chain.
 
-    The API is only reachable through the trusted reverse proxy chain (the
-    internal Caddy/nginx topology, see docker-compose.yml). Behind a CDN
-    such as Cloudflare the last X-Forwarded-For element is an edge address
-    shared by many clients, so the real client comes from CF-Connecting-IP,
-    which the CDN sets (and overwrites any client-supplied value of) on
-    every proxied request. Otherwise the proxy appends the address it
-    observed to X-Forwarded-For and the last chain element identifies the
-    real client, while earlier elements are client-supplied and spoofable.
-    For direct or non-private peers the socket peer itself is used, and the
-    key is length-capped so oversized headers cannot bloat throttle state.
+    Forwarded addresses are believed only when two conditions both hold:
+
+    1. ``TRUST_PROXY_CLIENT_IP`` is enabled — the operator has confirmed a
+       reverse proxy sits in front of the API and overwrites the header;
+    2. the socket peer is a private address — the request really arrived from
+       that proxy instead of straight from the internet.
+
+    ``X-Client-IP`` wins when present: nginx (scripts/vhost.py) overwrites it
+    with ``$remote_addr`` after Cloudflare real-IP resolution, so it survives
+    the extra Caddy hop that turns X-Forwarded-For's tail into the proxy's own
+    address. Without it, only the *last* X-Forwarded-For element is used — the
+    one the immediate proxy appended itself, so a client-supplied prefix cannot
+    influence the key. CF-Connecting-IP is never read: Caddy cannot tell a
+    forged value from a real one, and nothing guarantees it is overwritten.
+
+    The key is length-capped so oversized headers cannot bloat throttle state.
     """
     peer = peer_host or "unknown"
-    if not forwarded_for and not cf_connecting_ip:
+    if not trust_proxy:
         return peer
     try:
         if not ipaddress.ip_address(peer).is_private:
             return peer
     except ValueError:
         return peer
-    if cf_connecting_ip:
-        return cf_connecting_ip.strip()[:64]
-    chain = [part.strip() for part in forwarded_for.split(",") if part.strip()]
+    candidate = (client_ip or "").strip()
+    if candidate:
+        return candidate[:64]
+    chain = [part.strip() for part in (forwarded_for or "").split(",") if part.strip()]
     if not chain:
         return peer
     return chain[-1][:64]
@@ -313,7 +329,9 @@ def create_app() -> FastAPI:
         - Bearer Token 恒为主层级(配置文件里的 ACCESS_TOKEN)。
         - Cookie 会话携带 tier(primary/secondary);secondary 会话额外校验
           其令牌仍存在——管理页删除令牌后,该令牌签发的会话立即失效。
-        - 旧版会话(无 tier 字段)视为主层级,平滑兼容。
+        - 旧版会话(无 tier 字段)视为主层级:那些会话签发时只存在主 Token,
+          因此按主层级处理与当时的实际权限一致。
+        - 登出会把 jti 写入吊销表,重放旧 Cookie 不再通过。
         """
         settings: Settings = request.app.state.settings
         authorization = request.headers.get("authorization", "")
@@ -332,11 +350,17 @@ def create_app() -> FastAPI:
             return None
         if not isinstance(payload, dict) or payload.get("v") != 1:
             return None
-        if payload.get("tier") == "secondary":
+        tier = payload.get("tier", "primary")
+        if tier not in {"primary", "secondary"}:
+            return None
+        jti = payload.get("jti")
+        if jti and request.app.state.catalog.is_session_revoked(jti):
+            return None
+        if tier == "secondary":
             token_id = payload.get("tid")
             if not token_id or not request.app.state.catalog.access_token_exists(token_id):
                 return None
-        return payload
+        return {**payload, "tier": tier}
 
     def require_auth(request: Request) -> None:
         if _session_payload(request) is None:
@@ -370,7 +394,8 @@ def create_app() -> FastAPI:
         client_ip = _login_throttle_key(
             request.client.host if request.client else None,
             request.headers.get("x-forwarded-for"),
-            request.headers.get("cf-connecting-ip"),
+            request.headers.get("x-client-ip"),
+            trust_proxy=settings.trust_proxy_client_ip,
         )
         request.app.state.login_throttle.check(client_ip)
         if hmac.compare_digest(body.token.encode("utf-8"), settings.access_token.encode("utf-8")):
@@ -382,8 +407,13 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=401, detail="Invalid access token")
             tier, token_id = "secondary", row["id"]
             request.app.state.catalog.touch_access_token(row["id"])
-        request.app.state.login_throttle.success(client_ip)
-        session_payload: dict[str, Any] = {"v": 1, "iat": int(time()), "tier": tier}
+        session_payload: dict[str, Any] = {
+            "v": 1,
+            "iat": int(time()),
+            "tier": tier,
+            # 会话标识:登出时按它写吊销记录,旧 Cookie 重放即失效。
+            "jti": secrets.token_urlsafe(16),
+        }
         if token_id:
             session_payload["tid"] = token_id
         signed_session = request.app.state.serializer.dumps(session_payload)
@@ -402,7 +432,18 @@ def create_app() -> FastAPI:
     @app.post("/api/v1/auth/logout")
     async def logout(request: Request, response: Response) -> dict[str, bool]:
         ensure_same_origin(request)
-        response.delete_cookie(SESSION_COOKIE, path="/api", secure=request.app.state.settings.cookie_secure, httponly=True, samesite="strict")
+        settings: Settings = request.app.state.settings
+        cookie = request.cookies.get(SESSION_COOKIE, "")
+        if cookie:
+            try:
+                payload = request.app.state.serializer.loads(cookie, max_age=settings.session_ttl_seconds)
+            except (BadSignature, SignatureExpired):
+                payload = None
+            if isinstance(payload, dict) and isinstance(payload.get("jti"), str):
+                # 无状态签名 Cookie 只能靠服务端吊销表作废;不写这条记录,
+                # 登出就只是删了客户端副本,截获的旧 Cookie 仍能用到过期。
+                request.app.state.catalog.revoke_session(payload["jti"], settings.session_ttl_seconds)
+        response.delete_cookie(SESSION_COOKIE, path="/api", secure=settings.cookie_secure, httponly=True, samesite="strict")
         response.headers["Cache-Control"] = "no-store"
         return {"authenticated": False}
 

@@ -31,7 +31,11 @@ COPY app ./app
 
 EXPOSE 8000
 USER 10001:10001
-# No --proxy-headers: uvicorn would trust X-Forwarded-For from any peer and let
-# clients spoof it. The app derives the client identity for login throttling
-# itself, trusting only the last hop appended by the internal reverse proxy.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --no-proxy-headers is explicit, not decorative: uvicorn enables proxy headers
+# by default and trusts 127.0.0.1, which would let a local client rewrite
+# request.client through X-Forwarded-For and bypass the app's own peer check.
+# The app resolves the client identity for login throttling itself
+# (app/main.py:_login_throttle_key): it reads X-Client-IP or the last
+# X-Forwarded-For hop only when TRUST_PROXY_CLIENT_IP is enabled and the socket
+# peer is a private address.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers"]

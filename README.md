@@ -107,6 +107,11 @@ COOKIE_SECURE=true
 SESSION_TTL_SECONDS=2592000
 TRACKS_CONFIG=/app/config/tracks.yaml
 DB_PATH=/app/data/caraok.db
+
+# 登录限流按客户端地址分桶。只有确认 API 前面恒有反向代理覆写 X-Client-IP
+# （scripts/deploy.sh 的 nginx 就会）时才设为 true；保持 false 时所有客户端
+# 共用一个桶——安全，但一个攻击者能把所有人锁在登录之外。
+TRUST_PROXY_CLIENT_IP=false
 ```
 
 `ACCESS_TOKEN`、`APP_SECRET_KEY` 长度不足 32 字符时 API 拒绝启动；`AUDIO_ALLOWED_HOSTS` 为空或含协议/端口/路径时同样拒绝启动。
@@ -217,13 +222,15 @@ docker compose up -d --build    # 1B 拓扑
 
 ## 6. 安全与限制
 
-- Token 是个人访问凭证；登录接口按客户端 IP 在 15 分钟内限制 8 次失败。经可信反代访问时客户端身份取自 `CF-Connecting-IP`（Caddy 会剥离客户端伪造的同名头）或 `X-Forwarded-For` 最后一跳；直连时取 socket 对端。泄露后请更换 `ACCESS_TOKEN` 并 `docker compose up -d --force-recreate api`（`restart` 不会重载环境变量）。
+- Token 是个人访问凭证；登录接口按客户端 IP 在 15 分钟内限制 8 次失败，成功登录**不会**清空计数（否则持有任意一个访客令牌即可无限重置窗口）。仅当 `TRUST_PROXY_CLIENT_IP=true` 且请求确实来自内网反代时才采信 `X-Client-IP`（nginx 覆写）或 `X-Forwarded-For` 最后一跳，否则一律取 socket 对端；`CF-Connecting-IP` 不再被读取。泄露后请更换 `ACCESS_TOKEN` 并 `docker compose up -d --force-recreate api`（`restart` 不会重载环境变量）。
+- 登出会在服务端记录 `jti` 吊销表，重放登出前的 Cookie 会立即 401；无 `jti` 的旧会话只能等 TTL 自然过期。
+- 管理面（曲库 / 下载 / 访客令牌）只接受主 Token 会话；访客令牌可以播放和浏览，不能进入 `/admin`。
 - `/media/*` 由 Caddy 固定返回 404，web 容器不再挂载 `media/`；本地音频只能经 `/api/v1/stream/{id}` 读取。
 - 会话 Cookie 为 HttpOnly、SameSite=Strict、生产 Secure；前端不持久化主 Token。
 - API 不提供任意 URL 代理，只能播曲库里启用的 track ID。
 - 仅 HTTPS 且精确匹配 allowlist 的来源与重定向主机可被访问，降低 SSRF 风险。
 - 下载管道可以关闭（不提供 `YTDLP_COOKIES`）；启用时它对 `media/` 有写权限，请在可信环境使用。
-- 单人私人服务：没有注册、权限分级与多用户审计。
+- 单人使用为主：没有注册与多用户审计；访客令牌是共享凭证，不能追溯具体使用者。
 - Media Session、锁屏与方向盘按键取决于车机浏览器，需实机验证。
 - PWA 离线只缓存应用壳，播放需要网络。
 

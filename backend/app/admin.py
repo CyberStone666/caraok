@@ -8,6 +8,7 @@ Download jobs reuse the server-side yt-dlp recipe (cookies + PO token provider
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -67,7 +68,17 @@ def _next_order(tracks: list[Track], category_id: str) -> int:
 
 
 def _allocate_track_id(tracks: list[Track], base: str) -> str:
-    candidate = re.sub(r"[^a-zA-Z0-9_-]", "-", make_slug(base, "track"))[:63].strip("-_") or "track"
+    """Derive a stable, unique ASCII id from a display title.
+
+    Non-Latin titles (e.g. Chinese song names) slugify to nothing; falling back
+    to a bare "track" makes every such track collide into track / track-2 /
+    track-3. When the slug is empty, append a short hash of the original title
+    so ids stay readable-ish and stable per title.
+    """
+    slug = re.sub(r"[^a-zA-Z0-9_-]", "-", make_slug(base, "")).strip("-_")
+    if not slug:
+        slug = f"track-{hashlib.sha1(base.encode('utf-8')).hexdigest()[:6]}"
+    candidate = slug[:63].strip("-_") or "track"
     if not _ID_RE.fullmatch(candidate):
         candidate = "track"
     taken = {track.id for track in tracks}
@@ -307,6 +318,9 @@ class DownloadManager:
         finally:
             if cookies_path is not None:
                 cookies_path.unlink(missing_ok=True)
+            # 超时/取消会从 remux 的 await 处抛出,_pipeline 的 finally 未必跑完;
+            # 这里再兜一次,保证半成品不进 media 目录。
+            (settings.media_dir / f"{job.file_stem}.fix.m4a").unlink(missing_ok=True)
             self._prune_jobs()
 
     async def _pipeline(self, request: Request, job: DownloadJob, cookies_path: Path) -> None:
@@ -350,15 +364,21 @@ class DownloadManager:
             start_new_session=True,
         )
         job.process = remux
-        await remux.communicate()
-        if remux.returncode == 0:
-            try:
-                fixed_stat = fixed.stat()
-            except FileNotFoundError:
-                fixed_stat = None
-            if fixed_stat is not None and stat.S_ISREG(fixed_stat.st_mode):
-                source.unlink(missing_ok=True)
-                fixed.replace(source)
+        try:
+            await remux.communicate()
+            if remux.returncode == 0:
+                try:
+                    fixed_stat = fixed.stat()
+                except FileNotFoundError:
+                    fixed_stat = None
+                if fixed_stat is not None and stat.S_ISREG(fixed_stat.st_mode):
+                    source.unlink(missing_ok=True)
+                    fixed.replace(source)  # 成功后 fixed 已被移走
+        finally:
+            # ffmpeg 失败或被取消时会留下半成品 .fix.m4a;成功分支的 replace 已经
+            # 让它消失,所以这里无条件清一次是安全的,也不会碰正式产物。
+            _kill_process_tree(remux)
+            fixed.unlink(missing_ok=True)
 
         if not job.title.strip() or not job.artist.strip():
             await self._fill_metadata(request, job)
@@ -511,6 +531,8 @@ def create_admin_router(require_primary: Callable) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+        created: list[str] = []
+
         def _mutator(doc):
             if not any(cat.id == body.category_id for cat in doc.categories):
                 raise HTTPException(status_code=400, detail="分类不存在")
@@ -525,14 +547,16 @@ def create_admin_router(require_primary: Callable) -> APIRouter:
                 enabled=True,
                 order=_next_order(doc.tracks, body.category_id),
             )
+            created.append(track.id)
             return CatalogDocument(categories=doc.categories, tracks=doc.tracks + [track])
 
         try:
-            registered = catalog.update(_mutator)
+            catalog.update(_mutator)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        added = registered.tracks[-1]
-        return {"id": added.id, "title": added.title}
+        # 更新后的文档按 (order, title) 跨分类全局排序,末尾元素并不一定是刚插入
+        # 的那条;id 必须在持锁的 mutator 里取,否则会返回别的曲目的 id。
+        return {"id": created[0], "title": body.title}
 
     @router.patch("/tracks/{track_id}")
     async def patch_track(track_id: str, body: TrackPatchBody, request: Request) -> dict[str, object]:
@@ -582,17 +606,16 @@ def create_admin_router(require_primary: Callable) -> APIRouter:
         catalog.update(_mutator)
         track = target[0] if target else None
         removed_file = False
-        base = settings.public_media_base
-        if delete_file and base and track is not None and track.url.startswith(f"{base}/"):
-            name = track.url[len(base) + 1:]
-            path = (settings.media_dir / name).resolve()
-            try:
-                is_file = "/" not in name and path.is_relative_to(settings.media_dir.resolve()) and stat.S_ISREG(path.stat().st_mode)
-            except FileNotFoundError:
-                is_file = False
-            if is_file:
-                path.unlink()
-                removed_file = True
+        if delete_file and track is not None:
+            # 与流端点共用同一套路径解析:越界/非裸文件名一律返回 None。
+            path = resolve_local_media(settings, track.url)
+            if path is not None:
+                try:
+                    if stat.S_ISREG(path.stat().st_mode):
+                        path.unlink()
+                        removed_file = True
+                except FileNotFoundError:
+                    pass
         return {"id": track_id, "deleted": True, "file_removed": removed_file}
 
     @router.get("/tokens")

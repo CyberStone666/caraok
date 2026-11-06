@@ -151,6 +151,88 @@ Round 7 交付后重新评估，重点不是重读代码，而是**用探针打�
 - `bash -n scripts/deploy.sh` 通过；`--ignore-existing` 补种语义本地模拟通过。
 - 仍未验证：`docker compose build/up`、Caddy 容器内 `caddy validate`、真实 Cloudflare Full(strict) 回源、nginx `-t`。
 
+## Round 9 — 两级 Token 与开源化改造复审（2026-11-06，基线 `63d5df3`）
+
+本轮背景：远端历史被改写（squash 为 `c8d22ea Caraok v1.0.0`），同时引入**两级 Token**（主 Token + 访客令牌）、把服务器信息外置为 `scripts/deploy.conf`、加 MIT LICENSE。审查对象是新代码，不是 Round 7/8 的复述。
+
+### 基线健康度
+
+- 后端 pytest：**64 passed**（本机 3.13 复跑）。
+- 已确认 Round 7/8 的核心修复在历史改写后**未丢失**：`media.resolve_local_media` 的路径穿越防护、`_local_media_response` 的 206/304/416/HEAD、`catalog.update()` 的原子读改写、Dockerfile 的 deno 版本锁定 + `sha256sum -c`、SW 的 `__BUILD__` 版本注入、`origin.ensure_same_origin` 的 403 而非 500。
+
+### 🟠 高优先级
+
+| 编号 | 问题 | 证据 | 影响 |
+| --- | --- | --- | --- |
+| R9-1 | 登录限流可被任一合法访客令牌无限重置 | `main.py` 登录成功后调 `login_throttle.success()`，清空该 IP 的**全部**失败计数。实测：同一 IP 循环「1 次合法登录 + 7 次错误猜测」30 轮，**累计 210 次无效猜测，全程未触发 429** | 限流对持有访客令牌的攻击者失效。主 Token 熵足够时不构成破解路径，但若部署者自设弱 `ACCESS_TOKEN`（仅校验长度 ≥32），限流是唯一防线 |
+| R9-2 | 应用层无条件信任 `CF-Connecting-IP`，Caddy 不再剥离该头 | `_login_throttle_key` 对私网 peer 直接返回 `cf_connecting_ip`，无 `TRUST_PROXY_CLIENT_IP` 开关（Round 7 的显式开关已不存在）；`Caddyfile` 中 `header_up -CF-Connecting-IP` 已移除。实测：真实 uvicorn + 127.0.0.1 peer，轮换 `CF-Connecting-IP` 12 次，**全部 401，无 429** | 标准 `deploy.sh` 路径安全（`vhost.py` 用 `proxy_set_header CF-Connecting-IP $remote_addr` 覆写 + `firewall-cf.sh` 的 ipset 白名单）。但 README「1B 通用 VPS」路径（`docker compose up -d --build`，Caddy 直接发布 80/443）**没有任何一层剥离或覆写该头**，任意客户端可伪造它绕开限流 |
+| R9-3 | `POST /admin/tracks` 返回错误的曲目 id | `add_direct_track` 用 `registered.tracks[-1]` 取新曲，但 `update()` 返回的曲目按 `ORDER BY order_index, title` **跨分类全局排序**，新增曲目未必在末尾。实测：cat-a 有 order 1–10、cat-b 有 1–2 时，向 cat-b 新增曲目返回 `a10`，真实 id 为 `track` | 当前前端 `admin.tsx:180` 丢弃返回值后重载列表，所以 UI 未受影响；但 API 契约错误，任何消费返回值的脚本或后续前端改动都会操作错对象（错删/错改） |
+| R9-4 | 升级前的无 tier 会话访问管理面 403，与代码注释矛盾 | `_session_payload` docstring 写「旧版会话(无 tier 字段)视为主层级，平滑兼容」，但 `require_primary` 用 `payload.get("tier") != "primary"` 判定，`None != "primary"` 成立。实测：签名一个无 tier 的合法会话，`GET /api/v1/tracks` 返回 200、`GET /api/v1/admin/tracks` 返回 **403** | 从旧版本升级的管理员，会话仍有效但管理页全部 403，前端无提示，只能手动清 cookie 重新登录 |
+
+### 🟡 中优先级
+
+| 编号 | 问题 | 证据 |
+| --- | --- | --- |
+| R9-5 | 限流端到端测试被删除，回归无测试可挡 | `tests/test_throttle_live.py`（Round 7 建立的真实 uvicorn + 伪造头用例）在历史改写后不存在。现存 `test_app.py:273-304` 只是对 `_login_throttle_key` 的纯函数断言，且把这些不安全的假设（「CDN 会覆盖该头」）固化成预期行为；`test_login_attempts_are_throttled` 用 `TestClient`，peer 为字符串 `testclient`，永远走 `return peer` 分支 |
+| R9-6 | 注释与实现不符，误导后续维护 | `backend/Dockerfile` 末尾注释称「trusting only the last hop appended by the internal reverse proxy」，实际代码优先采信 `CF-Connecting-IP` |
+| R9-7 | 登出不吊销服务端会话 | `logout` 只调 `delete_cookie`，无服务端状态。实测：登出后重放登出前的 cookie，`GET /api/v1/tracks` 仍 200。无状态签名会话的固有性质，主 Token 同样如此；对「换设备/怀疑泄露」场景缺少强制下线手段 |
+| R9-8 | `delete_track` 仍自行实现一遍「URL → media_dir 路径」解析 | `admin.py:586-595` 与 `media.resolve_local_media` 逻辑重复。`_file_status` 已在 Round 9 前改为复用共享实现，删除路径仍没有；两处规则一旦分叉，会出现「管理页显示存在、删除删不掉」 |
+| R9-9 | remux 失败残留临时文件 | `_pipeline` 中 `ffmpeg` 返回码非 0 时，`.fix.m4a` 不会被清理，只在成功路径 `source.unlink` + `fixed.replace(source)` |
+
+### 🟢 建议
+
+- **R9-10** 中文标题曲目 id 退化：`_allocate_track_id` 把非 ASCII 字符替换为 `-` 后为空，回退为 `track`、`track-2`……功能无损，可读性差。
+- **R9-11** 访客令牌存裸 SHA-256 无盐。令牌是 192 位随机值，无盐可接受；若将来允许用户自定义令牌则必须换成 KDF。
+- **R9-12** `find_access_token_by_secret` 用 SQL 等值查询而非 `hmac.compare_digest`。查的是哈希不是明文，风险极低。
+- **R9-13** `access_token_exists` 的「读缓存 → 释放锁 → 查库 → 写缓存」存在竞态：并发删除后可能把 `True` 写回，令牌多活最多 5 秒。
+
+### Round 9 验证记录
+
+- 探针 A（16 项）：2 项 FAIL，即 R9-3、R9-4。其余 PASS：访客令牌不能进管理面（403）、删除令牌后其会话立即 401、Bearer 主 Token 可管理、下架曲目详情与 stream 均 404、令牌库仅存 64 位哈希。
+- 探针 B（真实 uvicorn，隔离虚拟 IP）：R9-1 复现——30 轮 210 次无效猜测无 429。
+- 探针 C（真实 uvicorn）：R9-2 复现——轮换 `CF-Connecting-IP` 12 次全部 401。
+- 未验证：前端 `tsc -b` 与 `vite build`（本机无 `node_modules`，安装受网络限制）、`docker compose build/up`、真实 Cloudflare 链路、nginx `-t`。
+
+### Round 9 结论
+
+没有发现新的鉴权绕过或数据泄露路径：`/media/*` 仍然是 404、本地媒体仍只能经鉴权接口读取、访客令牌无法触达管理面、令牌吊销即时生效。上述 🟠 四项中，R9-1 与 R9-2 削弱的是**限流这一层**，R9-3 是 API 契约错误，R9-4 是升级兼容性错误。建议在下次发布前修掉 R9-1～R9-4，并把 R9-5 的端到端限流测试补回。
+
+## Round 10 — Round 9 全部问题的修复与回归（2026-11-06，基线 `63d5df3`）
+
+Round 9 开出的 13 项（R9-1～R9-13）本轮全部处理，另在修复过程中发现 1 项此前未记录的缺陷（R10-1）。
+
+### 修复清单
+
+| 编号 | 修复方式 | 关键点 |
+| --- | --- | --- |
+| R9-1 | `LoginThrottle.success()` 删除，登录成功不再清空失败计数 | 失败记录只随窗口老化过期。校验码：7 次失败 + 1 次成功 + 第 8 次失败 = 401，第 9 次 = 429 |
+| R9-2 | 应用层彻底不再读 `CF-Connecting-IP`；新增 `TRUST_PROXY_CLIENT_IP`（默认 false）；只有「开关打开 + socket peer 为私网」才采信转发头 | 键优先级：`X-Client-IP`（nginx 覆写）→ `X-Forwarded-For` 末跳 → socket peer。`Caddyfile` / `Caddyfile.local` / `Caddyfile.tls` 对 `/api/*` 与 `/healthz` 加 `header_up -CF-Connecting-IP` |
+| R10-1 | `backend/Dockerfile` 的 `CMD` 补 `--no-proxy-headers` | uvicorn 自 0.13 起 `--proxy-headers` **默认开启**且默认信任 `127.0.0.1`，会直接改写 `request.client`。修复前从本机发起请求时，`X-Forwarded-For` 就是 peer，应用侧的 peer 校验被完全架空（探针实测 `peer='198.51.100.5'`）。原注释「No --proxy-headers」与事实不符 |
+| R9-3 | `add_direct_track` 在持锁的 mutator 内记录生成的 id，用 `created[0]` 返回 | 原实现取 `registered.tracks[-1]`，而持久化按 `(order, title)` 跨分类全局排序 |
+| R9-4 | `_session_payload` 把缺失的 `tier` 归一为 `primary`；非法 tier 值直接拒绝 | 旧会话签发时只有主 Token，按主层级处理与其当时权限一致 |
+| R9-5 | 重建 `backend/tests/test_throttle_live.py`（真实 uvicorn，3 个用例） | 覆盖：伪造头轮换不能逃逸、成功登录不清窗、开启信任后按 `X-Client-IP` 分桶 |
+| R9-6 | `Dockerfile` 注释改写为实际行为 | — |
+| R9-7 | 新增 `revoked_sessions` 表 + `revoke_session` / `is_session_revoked`；会话载荷加 `jti`，登出写入吊销记录 | 重放登出前的 Cookie 现在返回 401。无 `jti` 的旧会话无法吊销，随 TTL 自然过期 |
+| R9-8 | `delete_track` 改用 `resolve_local_media` | 与 `_file_status`、流端点共用同一套路径规则 |
+| R9-9 | remux 包进 `try/finally`：失败/取消时 `killpg` + 删除 `.fix.m4a`；`_run.finally` 再兜一次 | 超时路径也不会残留 |
+| R9-10 | 非拉丁标题的曲目 id 改为 `track-<sha1 前 6 位>` | `夜航` → `track-xxxxxx`，同标题第二条自动加 `-2` |
+| R9-12 | `find_access_token_by_secret` 改为逐行 `hmac.compare_digest` | 多条令牌时也不提前 return |
+| R9-13 | `access_token_exists` 缓存 TTL 5s → 2s；删除时仍立刻写入 `(0, False)` | 真正的「删即吊销」由删除路径保证，不依赖 TTL |
+| R9-11 | 不修，保留说明 | 192 位随机令牌无盐 SHA-256 的字典攻击不可行；若将来允许自定义令牌必须换成 KDF |
+
+### 验证记录
+
+- 后端 pytest：**74 passed**（`TMPDIR=/tmp`，`--basetemp=/tmp/caraok_r10b`）。新增 12 项：限流键 7 项、成功登录不清窗、旧会话按主层级、非法 tier 拒绝、登出吊销、新增曲目返回真实 id、中文标题 id 唯一、删除越界文件被拒。
+- `test_throttle_live.py` 三个用例在同一进程内起真实 uvicorn（`--no-proxy-headers`，与镜像一致），peer 为 `127.0.0.1`：
+  - 轮换 `X-Forwarded-For` / `X-Client-IP` / `CF-Connecting-IP` 各 8 次后第 9 次返回 429（修复前 12 次轮换全部 401）。
+  - 7 次失败 → 1 次成功 → 第 8 次失败 401 → 第 9 次 429（修复前每轮清零，210 次猜测无拦截）。
+  - 开启 `TRUST_PROXY_CLIENT_IP` 后，`X-Client-IP=203.0.113.10` 用满额度，`203.0.113.11` 仍可正常尝试。
+- 前端未改动，`tsc` 相关验证沿用 Round 9 结论（本机无 `node_modules`）。
+
+### 仍未验证
+
+`docker compose build/up`、Caddy 容器内配置校验、真实 Cloudflare Full(strict) 链路、nginx `-t`。`--no-proxy-headers` 与 `header_up -CF-Connecting-IP` 只有在 VPS 上跑一次 `bash scripts/deploy.sh` 才能确认生效。
+
 ## 本次实际验证
 
 - 后端 pytest：**19 passed**（最终复测无 warning）。

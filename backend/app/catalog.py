@@ -9,6 +9,7 @@ tracks.yaml is imported once on first boot and left untouched afterwards.
 from __future__ import annotations
 
 import ipaddress
+import hmac
 import logging
 import hashlib
 import re
@@ -65,6 +66,10 @@ CREATE TABLE IF NOT EXISTS tracks (
     mime_type TEXT NOT NULL DEFAULT 'audio/mpeg',
     enabled INTEGER NOT NULL DEFAULT 1,
     order_index INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS revoked_sessions (
+    jti TEXT PRIMARY KEY,
+    expires_at REAL NOT NULL
 );
 """
 
@@ -321,8 +326,12 @@ class Catalog:
             ).fetchone()
         return dict(row) if row else None
 
-    def access_token_exists(self, token_id: str, ttl_seconds: float = 5.0) -> bool:
-        """会话热路径专用:带 TTL 的存在性检查(缓存未命中才查库)。"""
+    def access_token_exists(self, token_id: str, ttl_seconds: float = 2.0) -> bool:
+        """会话热路径专用:带 TTL 的存在性检查(缓存未命中才查库)。
+
+        删除令牌时会把该条缓存立即置为已失效,所以"删即吊销"不依赖 TTL;
+        TTL 只用于挡住热路径上的重复查库。
+        """
         now = time.time()
         with self._lock:
             cached = self._token_exists_cache.get(token_id)
@@ -336,12 +345,21 @@ class Catalog:
         return exists
 
     def find_access_token_by_secret(self, token: str) -> dict[str, Any] | None:
+        """按明文令牌查行;逐条常量时间比较,不把哈希交给 SQL 等值判断。"""
+        digest = self._hash_token(token)
         with self._lock:
-            row = self._conn.execute(
-                "SELECT id, name, created_at, last_used_at FROM access_tokens WHERE token_hash = ?",
-                (self._hash_token(token),),
-            ).fetchone()
-        return dict(row) if row else None
+            rows = self._conn.execute(
+                "SELECT id, name, created_at, last_used_at, token_hash FROM access_tokens"
+            ).fetchall()
+        matched: dict[str, Any] | None = None
+        for row in rows:
+            # 不提前 return:命中位置不应通过耗时暴露。
+            if hmac.compare_digest(str(row["token_hash"]), digest) and matched is None:
+                matched = {
+                    "id": row["id"], "name": row["name"],
+                    "created_at": row["created_at"], "last_used_at": row["last_used_at"],
+                }
+        return matched
 
     def touch_access_token(self, token_id: str) -> None:
         with self._lock:
@@ -357,6 +375,30 @@ class Catalog:
             # 立即失效:被吊销的会话不能因缓存继续通过校验
             self._token_exists_cache[token_id] = (0.0, False)
         return cursor.rowcount > 0
+
+    # ── 会话吊销(登出) ──
+    def revoke_session(self, jti: str, ttl_seconds: float) -> None:
+        """把会话 jti 记入吊销表,保留到它自然过期为止。
+
+        签名 Cookie 是无状态的,不落这条记录,"登出"就只是删掉了本地副本,
+        被截获的旧 Cookie 仍可用满 TTL。
+        """
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO revoked_sessions (jti, expires_at) VALUES (?, ?)",
+                (jti, now + ttl_seconds),
+            )
+            self._conn.execute("DELETE FROM revoked_sessions WHERE expires_at < ?", (now,))
+            self._conn.commit()
+
+    def is_session_revoked(self, jti: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM revoked_sessions WHERE jti = ? AND expires_at >= ?",
+                (jti, time.time()),
+            ).fetchone()
+        return row is not None
 
     def get_category(self, category_id: str) -> Category | None:
         with self._lock:

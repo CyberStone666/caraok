@@ -2,8 +2,10 @@
 """Regenerate the caraok-managed nginx server block (idempotent, line-based).
 
 The managed block sits inside http{} right before its closing brace, wrapped
-in BEGIN/END markers. real_ip only trusts Cloudflare ranges and the proxy
-overwrites CF-Connecting-IP, so spoofed headers never reach the app (#6).
+in BEGIN/END markers. real_ip only trusts Cloudflare ranges, and the upstream
+proxy headers are overwritten rather than forwarded, so a spoofed client IP
+never reaches the app (#6). X-Client-IP carries the resolved client address;
+the app reads it only when TRUST_PROXY_CLIENT_IP is enabled.
 """
 
 import argparse
@@ -36,8 +38,9 @@ server {
     location / {
         proxy_pass {upstream};
         proxy_set_header Host $host;
-        # 覆写而非透传:应用侧拿到的恒为 nginx 判定的真实客户端
-        proxy_set_header CF-Connecting-IP $remote_addr;
+        # 覆写而非透传:应用只信这个头,它恒为 nginx 判定后的真实客户端。
+        # 不用 CF-Connecting-IP——Caddy 还会再加一跳,那个头无法区分伪造值。
+        proxy_set_header X-Client-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
         proxy_http_version 1.1;
