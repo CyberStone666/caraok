@@ -697,16 +697,3 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
   .api-errors { bottom: max(12px, env(safe-area-inset-bottom)); }
   .api-errors-bar { padding: 11px 13px; font-size: 12px; }
 }
-
-/* ── Token 可见性切换 ── */
-.token-field { position: relative; }
-.token-field input { padding-right: 46px; }
-.token-toggle {
-  position: absolute; right: 7px; top: 50%; transform: translateY(-50%);
-  width: 36px; height: 36px; display: grid; place-items: center;
-  background: transparent; border: 0; border-radius: 10px;
-  color: var(--muted); cursor: pointer;
-  transition: color .2s var(--ease), background .2s var(--ease);
-}
-.token-toggle:hover { color: var(--mint); background: rgba(110, 231, 191, .07); }
-.token-toggle svg { width: 19px; height: 19px; }
